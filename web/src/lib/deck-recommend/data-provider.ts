@@ -47,7 +47,7 @@ export const USER_DATA_KEYS = [
 ].join(",");
 const USER_DATA_KEYS_LIST = USER_DATA_KEYS.split(",");
 
-// Master data keys needed for preloading
+// Master data keys needed for common preload
 export const PRELOAD_MASTER_KEYS = [
     "areaItemLevels", "cards", "cardMysekaiCanvasBonuses", "cardRarities",
     "characterRanks", "cardEpisodes", "events", "eventCards",
@@ -58,6 +58,20 @@ export const PRELOAD_MASTER_KEYS = [
     "worldBloomSupportDeckBonusesWL2", "worldBloomSupportDeckBonusesWL3",
     "worldBloomSupportDeckUnitEventLimitedBonuses",
 ];
+
+// Master data keys required by the C++/WASM deck recommend core
+export const WASM_MASTER_KEYS = [
+    "areaItemLevels", "areaItems", "areas", "cardEpisodes", "cards",
+    "cardMysekaiCanvasBonuses", "cardRarities", "characterRanks", "eventCards",
+    "eventDeckBonuses", "eventExchangeSummaries", "events", "eventItems",
+    "eventRarityBonusRates", "gameCharacters", "gameCharacterUnits", "honors",
+    "masterLessons", "musicDifficulties", "musics", "musicVocals", "mysekaiFixtureGameCharacterGroupPerformanceBonuses",
+    "mysekaiFixtureGameCharacterGroups", "mysekaiGates", "mysekaiGateLevels",
+    "shopItems", "skills", "worldBloomDifferentAttributeBonuses", "worldBlooms",
+    "worldBloomSupportDeckBonuses", "worldBloomSupportDeckBonusesWL1",
+    "worldBloomSupportDeckBonusesWL2", "worldBloomSupportDeckBonusesWL3",
+    "worldBloomSupportDeckUnitEventLimitedBonuses",
+] as const;
 
 const LOCAL_MASTER_DATA_PATHS: Partial<Record<string, string>> = {
     worldBloomSupportDeckBonusesWL1: "/data/worldBloomSupportDeckBonusesWL1.json",
@@ -403,4 +417,11 @@ export class SnowyDataProvider implements DataProvider {
         this.userDataCache = data;
         return data;
     }
+}
+
+export async function buildWasmMasterDataBundle(dataProvider: Pick<DataProvider, "getMasterData">): Promise<Record<string, unknown[]>> {
+    const entries = await Promise.all(
+        WASM_MASTER_KEYS.map(async (key) => [key, await dataProvider.getMasterData<unknown>(key)] as const),
+    );
+    return Object.fromEntries(entries);
 }

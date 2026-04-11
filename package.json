@@ -6,7 +6,8 @@
         "dev": "npm run dev --prefix web",
         "build": "npm run build --prefix web",
         "start": "npm run start --prefix web",
-        "lint": "npm run lint --prefix web"
+        "lint": "npm run lint --prefix web",
+        "build:sekai-deck-recommend-wasm": "node scripts/build-sekai-deck-recommend-wasm.mjs"
     },
     "workspaces": [
         "web",

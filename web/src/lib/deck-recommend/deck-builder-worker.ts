@@ -1,18 +1,7 @@
-/**
- * Web Worker for score-control deck building
- * Uses EventBonusDeckRecommend to find decks with exact target event bonus
- *
- * 组卡代码来源: sekai-calculator (https://github.com/pjsek-ai/sekai-calculator)
- * 部分算法优化修改于: https://github.com/NeuraXmy/sekai-deck-recommend-cpp  作者: luna茶
- */
-import {
-    type CardConfig,
-    CachedDataProvider,
-    EventBonusDeckRecommend,
-    LiveCalculator,
-    LiveType,
-} from "sekai-calculator";
-import { calcDuration, PRELOAD_MASTER_KEYS, type HarukiServer, SnowyDataProvider } from "./data-provider";
+import { CachedDataProvider } from "sekai-calculator";
+import { buildWasmMasterDataBundle, calcDuration, WASM_MASTER_KEYS, type HarukiServer, SnowyDataProvider } from "./data-provider";
+import { SekaiDeckRecommendWasm } from "./sekaiDeckRecommendWasm";
+import { buildDeckRecommendWasmPayload, normalizeWasmDeckResults, type WasmCardConfig } from "./wasm-adapter";
 
 interface UserCardEntry {
     cardId: number;
@@ -26,10 +15,6 @@ interface EventInfoLite {
 
 type DeckResultRow = Record<string, unknown>;
 
-// ==================== WORKER LOGIC ====================
-
-// Types
-
 export interface DeckBuilderInput {
     userId: string;
     server: string;
@@ -37,11 +22,11 @@ export interface DeckBuilderInput {
     eventId: number;
     minBonus: number;
     maxBonus: number;
-    liveType: string; // "multi" | "solo" | "auto" | "cheerful"
+    liveType: string;
     musicId: number;
     difficulty: string;
     supportCharacterId?: number;
-    cardConfig: Record<string, CardConfig>;
+    cardConfig: Record<string, WasmCardConfig>;
 }
 
 export interface DeckBuilderOutput {
@@ -52,85 +37,72 @@ export interface DeckBuilderOutput {
     upload_time?: number;
 }
 
-async function deckBuilderRunner(args: DeckBuilderInput): Promise<DeckBuilderOutput> {
-    const {
-        userId, server, oauthAccessToken, eventId, minBonus, maxBonus,
-        liveType: liveTypeStr, musicId, difficulty,
-        supportCharacterId, cardConfig,
-    } = args;
+async function resolveEventLiveType(
+    dataProvider: CachedDataProvider,
+    eventId: number,
+    liveType: string,
+): Promise<string> {
+    const events = await dataProvider.getMasterData<EventInfoLite>("events");
+    const event0 = events.find((it) => it.id === eventId);
+    if (!event0) {
+        throw new Error(`Event not found: ${eventId}`);
+    }
+    if (event0.eventType === "cheerful_carnival" && liveType === "multi") {
+        return "cheerful";
+    }
+    return liveType;
+}
 
+async function deckBuilderRunner(args: DeckBuilderInput): Promise<DeckBuilderOutput> {
     const dataProvider = new CachedDataProvider(
-        new SnowyDataProvider(userId, server as HarukiServer, oauthAccessToken || null)
+        new SnowyDataProvider(args.userId, args.server as HarukiServer, args.oauthAccessToken || null),
     );
 
-    // Parallel preload all data
     await Promise.all([
         dataProvider.getUserDataAll(),
         dataProvider.getMusicMeta(),
-        dataProvider.preloadMasterData(PRELOAD_MASTER_KEYS),
+        dataProvider.preloadMasterData([...WASM_MASTER_KEYS]),
     ]);
 
-    const userCards = await dataProvider.getUserData<UserCardEntry[]>("userCards");
-    const uploadTime = await dataProvider.getUserData<number | undefined>("upload_time").catch(() => undefined);
+    const userDataAll = await dataProvider.getUserDataAll() as Record<string, unknown>;
+    const userCards = (Array.isArray(userDataAll.userCards) ? userDataAll.userCards : []) as UserCardEntry[];
+    const uploadTime = typeof userDataAll.upload_time === "number" ? userDataAll.upload_time : undefined;
+    const effectiveLiveType = await resolveEventLiveType(dataProvider, args.eventId, args.liveType);
 
-    const liveCalculator = new LiveCalculator(dataProvider);
-    const musicMeta = await liveCalculator.getMusicMeta(musicId, difficulty);
+    const [masterData, musicMetas] = await Promise.all([
+        buildWasmMasterDataBundle(dataProvider),
+        dataProvider.getMusicMeta(),
+    ]);
 
-    // Map liveType string to enum
-    let computedLiveType: LiveType;
-    switch (liveTypeStr) {
-        case "solo":
-            computedLiveType = LiveType.SOLO;
-            break;
-        case "auto":
-            computedLiveType = LiveType.AUTO;
-            break;
-        case "cheerful":
-            computedLiveType = LiveType.CHEERFUL;
-            break;
-        case "multi":
-        default:
-            computedLiveType = LiveType.MULTI;
-            break;
-    }
-
-    // Check event type for cheerful carnival conversion
-    const events = await dataProvider.getMasterData<EventInfoLite>("events");
-    const event0 = events.find((it) => it.id === eventId);
-    if (!event0) throw new Error(`Event not found: ${eventId}`);
-
-    if (event0.eventType === "cheerful_carnival" && computedLiveType === LiveType.MULTI) {
-        computedLiveType = LiveType.CHEERFUL;
-    }
-
-    const recommend = new EventBonusDeckRecommend(dataProvider);
-    const currentDuration = calcDuration();
-
-    const result = await recommend.recommendEventBonusDeck(
-        eventId,
-        minBonus,
-        computedLiveType,
+    const payload = buildDeckRecommendWasmPayload(
         {
-            musicMeta,
-            member: 5,
-            cardConfig,
-            debugLog: (str: string) => {
-                console.log("[DeckBuilder]", str);
-            },
+            ...args,
+            mode: "bonus",
+            liveType: effectiveLiveType,
         },
-        supportCharacterId || 0,
-        maxBonus
+        {
+            region: args.server,
+            masterData,
+            userData: userDataAll,
+            musicMetas,
+        },
     );
 
+    const wasm = new SekaiDeckRecommendWasm();
+    await wasm.init();
+
+    const currentDuration = calcDuration();
+    const wasmResult = wasm.runRecommend<{ decks?: DeckResultRow[] }>(payload);
+    const result = normalizeWasmDeckResults(wasmResult);
+
     return {
-        result: result as unknown as DeckResultRow[],
+        result,
         userCards,
         duration: currentDuration.done(),
         upload_time: uploadTime,
     };
 }
 
-// Worker message handler
 addEventListener("message", (event: MessageEvent<{ args: DeckBuilderInput }>) => {
     deckBuilderRunner(event.data.args)
         .then((output) => {
@@ -138,7 +110,7 @@ addEventListener("message", (event: MessageEvent<{ args: DeckBuilderInput }>) =>
         })
         .catch((err) => {
             postMessage({
-                error: err.message || String(err),
+                error: err instanceof Error ? err.message : String(err),
             });
         });
 });
